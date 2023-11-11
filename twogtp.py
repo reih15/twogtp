@@ -4,7 +4,6 @@ import argparse
 import datetime
 import os
 import re
-import string
 import subprocess
 import sys
 import threading
@@ -12,34 +11,9 @@ import zlib
 from signal import SIGINT
 from typing import Iterable, Optional
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--black", required=True)
-parser.add_argument("--white", required=True)
-parser.add_argument("--referee")
-parser.add_argument("--black_name", default="b")
-parser.add_argument("--white_name", default="w")
-parser.add_argument("--alternate", action="store_true")
-parser.add_argument("--size", type=int, default=19)
-parser.add_argument("--komi", type=float, default=6.5)
-parser.add_argument("--games", type=int, default=1)
-parser.add_argument("--maxmoves", type=int, default=1000)
-parser.add_argument("--sgfs_dir", default="sgfs")
-args = vars(parser.parse_args())
+from pysgf import Move, SGFNode
 
-print(f"[twogtp] args: {args}\n")
-
-engine_1_cmd = re.split(r"\s+", args["black"].rstrip())
-engine_1_name = args["black_name"]
-engine_2_cmd = re.split(r"\s+", args["white"].rstrip())
-engine_2_name = args["white_name"]
-
-alternate = args["alternate"]
-size = args["size"]
-komi = args["komi"]
-games = args["games"]
-maxmoves = args["maxmoves"]
-
-sgfs_dir = args["sgfs_dir"]
+ENCODING = "utf-8"
 
 
 class GTPEngine:
@@ -60,7 +34,7 @@ class GTPEngine:
     def write_command(self, command: str) -> None:
         def write_command_target() -> None:
             if self._proc.stdin is not None:
-                self._proc.stdin.write(f"{command}\n".encode("utf-8"))
+                self._proc.stdin.write(f"{command}\n".encode(ENCODING))
                 self._proc.stdin.flush()
             else:
                 print("[twogtp] proc.stdin is None")
@@ -77,7 +51,7 @@ class GTPEngine:
                 print("[twogtp] proc.stdout is None")
                 return []
 
-            line = self._proc.stdout.readline().decode("utf-8").replace(os.linesep, "\n")
+            line = self._proc.stdout.readline().decode(ENCODING).replace(os.linesep, "\n")
             if line.startswith("=") or line.startswith("?"):
                 response_started = True
             if response_started:
@@ -100,62 +74,35 @@ def now_jst() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
 
 
-class SGF:
+class GameData:
     def __init__(self) -> None:
-        self.gm = 1
-        self.ff = 4
-        self.ca = "utf-8"
-        self.sz = 19
+        self.date: Optional[str] = None
+        self.player_black: Optional[str] = None
+        self.player_white: Optional[str] = None
 
-        self.dt: Optional[str] = None
-        self.pb: Optional[str] = None
-        self.pw: Optional[str] = None
+        self.size = 19
+        self.komi = 6.5
+        self.result: Optional[str] = None
 
-        self.km = 6.5
-        self.re: Optional[str] = None
+        self.moves: list[Move] = []
 
-        self.moves: list[tuple[str, str]] = []
+    def add_move(self, move: Move) -> None:
+        self.moves.append(move)
 
-    def add_move(self, color: str, move: str) -> None:
-        self.moves.append((color, move))
-
-    def add_move_from_genmove_return(self, color: str, genmove_return: str) -> None:
-        if genmove_return == "pass":
-            self.add_move(color, "")
-            return
-
-        genmove_column_labels = list(string.ascii_lowercase.replace("i", "")[: self.sz])
-        move_labels = list(string.ascii_lowercase[: self.sz])
-        c = genmove_return[0]
-        r = genmove_return[1:]
-        move = f"{move_labels[genmove_column_labels.index(c)]}{move_labels[self.sz - int(r)]}"
-        self.add_move(color, move)
-
-    def gen_file_name(self, data_for_hash: str) -> str:
-        now = now_jst()
-        h = zlib.crc32(data_for_hash.encode())
-        if self.pb and self.pw:
-            return f"{now:%Y%m%d-%H%M%S}_{self.pb}-{self.pw}_{h:08x}.sgf"
-        else:
-            return f"{now:%Y%m%d-%H%M%S}_{h:08x}.sgf"
-
-    def join_all_data(self) -> str:
-        root_gameinfo_properties = [";", f"GM[{self.gm}]", f"FF[{self.ff}]", f"CA[{self.ca}]", f"SZ[{self.sz}]"]
-        if self.dt is not None:
-            root_gameinfo_properties.append(f"DT[{self.dt}]")
-        if self.pb is not None:
-            root_gameinfo_properties.append(f"PB[{self.pb}]")
-        if self.pw is not None:
-            root_gameinfo_properties.append(f"PW[{self.pw}]")
-        root_gameinfo_properties.append(f"KM[{self.km}]")
-        if self.re is not None:
-            root_gameinfo_properties.append(f"RE[{self.re}]")
-
-        root_gameinfo_joined = "".join(root_gameinfo_properties)
+    def sgf(self) -> str:
+        root = SGFNode(properties={"GM": 1, "FF": 4, "CA": ENCODING, "SZ": self.size, "KM": self.komi})
+        if self.date is not None:
+            root.set_property("DT", self.date)
+        if self.player_black is not None:
+            root.set_property("PB", self.player_black)
+        if self.player_white is not None:
+            root.set_property("PW", self.player_white)
+        if self.result is not None:
+            root.set_property("RE", self.result)
 
         end_pass_count = 0
-        for _, move in reversed(self.moves):
-            if move == "":
+        for move in reversed(self.moves):
+            if move.gtp() == "pass":
                 end_pass_count += 1
             else:
                 break
@@ -163,21 +110,27 @@ class SGF:
         if end_pass_count >= 2:
             end_passes_removed_moves = self.moves[:-end_pass_count]
 
-        moves_joined = "".join([f";{c.upper()}[{move}]" for c, move in end_passes_removed_moves])
+        prev_node = root
+        for move in end_passes_removed_moves:
+            node = SGFNode(parent=prev_node, move=move)
+            prev_node = node
 
-        return f"({root_gameinfo_joined}{moves_joined})\n"
+        return root.sgf()
 
-    def dump_to_file(self, file_path: str, joined_data: Optional[str] = None) -> None:
-        if joined_data is None:
-            joined_data = self.join_all_data()
+    def _gen_file_name(self, data_for_hash: str) -> str:
+        now = now_jst()
+        h = zlib.crc32(data_for_hash.encode())
+        if self.player_black and self.player_white:
+            return f"{now:%Y%m%d-%H%M%S}_{self.player_black}-{self.player_white}_{h:08x}.sgf"
+        else:
+            return f"{now:%Y%m%d-%H%M%S}_{h:08x}.sgf"
 
-        with open(file_path, "w", encoding=self.ca) as f:
-            f.write(joined_data)
-
-    def dump_in_dir(self, dir_path: str) -> None:
+    def dump_sgf_in_dir(self, dir_path: str) -> None:
         abs_dir_path = os.path.abspath(dir_path)
-        joined_data = self.join_all_data()
-        self.dump_to_file(f"{abs_dir_path}{os.path.sep}{self.gen_file_name(joined_data)}", joined_data)
+        sgf = self.sgf()
+        file_path = f"{abs_dir_path}{os.path.sep}{self._gen_file_name(sgf)}"
+        with open(file_path, "w", encoding=ENCODING) as f:
+            f.write(sgf)
 
 
 def send_command_to_engines(command: str, engines: Iterable[GTPEngine]) -> None:
@@ -191,10 +144,11 @@ def setup_engines(engines: Iterable[GTPEngine]) -> None:
         send_command_to_engines(command, engines)
 
 
-def synchronize_engine(engine: GTPEngine, move_history: list[tuple[str, str]]) -> None:
-    for color, move in move_history:
-        if move != "pass":
-            engine.communicate(f"play {color} {move}")
+def synchronize_engine(engine: GTPEngine, moves: list[Move]) -> None:
+    for move in moves:
+        gtp_coords = move.gtp()
+        if gtp_coords != "pass":
+            engine.communicate(f"play {move.player} {gtp_coords}")
 
 
 def format_response_line(response_lines: list[str]) -> str:
@@ -207,6 +161,34 @@ def quit_engines(engines: Iterable[GTPEngine]) -> None:
         engine.proc.wait()
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--black", required=True)
+parser.add_argument("--white", required=True)
+parser.add_argument("--referee")
+parser.add_argument("--black_name", default="b")
+parser.add_argument("--white_name", default="w")
+parser.add_argument("--alternate", action="store_true")
+parser.add_argument("--size", type=int, default=19)
+parser.add_argument("--komi", type=float, default=6.5)
+parser.add_argument("--games", type=int, default=1)
+parser.add_argument("--maxmoves", type=int, default=1000)
+parser.add_argument("--sgfs_dir", default="sgfs")
+args = vars(parser.parse_args())
+
+print(f"[twogtp] args: {args}\n")
+
+alternate = args["alternate"]
+size = args["size"]
+komi = args["komi"]
+games = args["games"]
+maxmoves = args["maxmoves"]
+
+sgfs_dir = args["sgfs_dir"]
+
+engine_1_cmd = re.split(r"\s+", args["black"].rstrip())
+engine_1_name = args["black_name"]
+engine_2_cmd = re.split(r"\s+", args["white"].rstrip())
+engine_2_name = args["white_name"]
 engine_1 = GTPEngine(engine_1_cmd, engine_1_name)
 engine_2 = GTPEngine(engine_2_cmd, engine_2_name)
 all_engines = [engine_1, engine_2]
@@ -225,56 +207,53 @@ def game_loop() -> None:
 
         setup_engines([black, white])
 
-        sgf = SGF()
-        sgf.sz = size
-        sgf.km = komi
-        sgf.pb, sgf.pw = black.name, white.name
+        game_data = GameData()
+        game_data.size = size
+        game_data.komi = komi
+        game_data.player_black = black.name
+        game_data.player_white = white.name
 
-        move_history = []
         last_move_is_pass = False
         for move_num in range(1, maxmoves + 1):
             if move_num % 2 == 1:
-                color = "b"
+                color = "B"
                 now_turn = black
                 the_other = white
             else:
-                color = "w"
+                color = "W"
                 now_turn = white
                 the_other = black
 
-            move = format_response_line(now_turn.communicate(f"genmove {color}")).lower()
-            if move == "resign":
-                if color == "b":
-                    sgf.re = "W+R"
+            gtp_coords = format_response_line(now_turn.communicate(f"genmove {color}")).lower()
+            if gtp_coords == "resign":
+                if color == "B":
+                    game_data.result = "W+R"
                 else:
-                    sgf.re = "B+R"
+                    game_data.result = "B+R"
                 break
             else:
-                move_history.append((color, move))
-                if move == "pass":
+                game_data.add_move(Move.from_gtp(gtp_coords.upper(), color))
+                if gtp_coords == "pass":
                     if last_move_is_pass:
                         setup_engines([referee])
-                        synchronize_engine(referee, move_history)
+                        synchronize_engine(referee, game_data.moves)
                         result = format_response_line(referee.communicate("final_score"))
-                        sgf.re = result.upper()
+                        game_data.result = result.upper()
                         break
                     else:
                         last_move_is_pass = True
                 else:
-                    the_other.communicate(f"play {color} {move}")
+                    the_other.communicate(f"play {color} {gtp_coords}")
                     last_move_is_pass = False
 
-        if sgf.re is None:
-            sgf.re = "Void"
+        if game_data.result is None:
+            game_data.result = "Void"
 
         now = now_jst()
-        sgf.dt = f"{now:%Y-%m-%d}"
-
-        for color, move in move_history:
-            sgf.add_move_from_genmove_return(color, move)
+        game_data.date = f"{now:%Y-%m-%d}"
 
         os.makedirs(sgfs_dir, exist_ok=True)
-        sgf.dump_in_dir(sgfs_dir)
+        game_data.dump_sgf_in_dir(sgfs_dir)
 
         if alternate:
             tmp = black
