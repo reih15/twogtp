@@ -10,10 +10,12 @@ import threading
 import zlib
 from signal import SIGINT
 from typing import Iterable, Optional
+from urllib.parse import quote
 
 from pysgf import Move, SGFNode
 
 ENCODING = "utf-8"
+SGFVIEWER_URL_PREFIX = "https://reih15.github.io/SGFViewer/view.html?sgf="
 
 
 class GTPEngine:
@@ -246,11 +248,15 @@ def game_loop() -> None:
                     the_other.communicate(f"play {color} {gtp_coords}")
                     last_move_is_pass = False
 
+            print(f"[twogtp] {SGFVIEWER_URL_PREFIX}{quote(game_data.sgf())}")
+
         if game_data.result is None:
             game_data.result = "Void"
 
         now = now_jst()
         game_data.date = f"{now:%Y-%m-%d}"
+
+        print(f"[twogtp] {SGFVIEWER_URL_PREFIX}{quote(game_data.sgf())}")
 
         os.makedirs(sgfs_dir, exist_ok=True)
         game_data.dump_sgf_in_dir(sgfs_dir)
