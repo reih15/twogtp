@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import zlib
 from signal import SIGINT
 from typing import Iterable, Optional
@@ -175,6 +176,7 @@ parser.add_argument("--komi", type=float, default=6.5)
 parser.add_argument("--games", type=int, default=1)
 parser.add_argument("--maxmoves", type=int, default=1000)
 parser.add_argument("--sgfs_dir", default="sgfs")
+parser.add_argument("--sleep_sec", type=float, default=0)
 args = vars(parser.parse_args())
 
 print(f"[twogtp] args: {args}\n")
@@ -186,6 +188,8 @@ games = args["games"]
 maxmoves = args["maxmoves"]
 
 sgfs_dir = args["sgfs_dir"]
+
+sleep_sec = args["sleep_sec"]
 
 engine_1_cmd = re.split(r"\s+", args["black"].rstrip())
 engine_1_name = args["black_name"]
@@ -249,6 +253,10 @@ def game_loop() -> None:
                     last_move_is_pass = False
 
             print(f"[twogtp] {SGFVIEWER_URL_PREFIX}{quote(game_data.sgf())}")
+
+            if sleep_sec > 0:
+                print(f"[twogtp] sleep {sleep_sec}")
+                time.sleep(sleep_sec)
 
         if game_data.result is None:
             game_data.result = "Void"
